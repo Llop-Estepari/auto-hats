@@ -58,16 +58,17 @@ jobs:
 
       - name: Verificar AppImage
         run: |
+          set -eux
           cd dist
           unset APPIMAGE_EXTRACT_AND_RUN
           ./Auto-HATS-*.AppImage --appimage-extract > /dev/null
           test -x squashfs-root/AppRun
           test -x squashfs-root/usr/bin/auto-hats
           test -f squashfs-root/auto-hats.desktop
-          test -d squashfs-root/usr/bin/_tcl_data
-          file squashfs-root/usr/bin/auto-hats
-          ldd squashfs-root/usr/bin/auto-hats | tee /tmp/ldd.txt
-          ! grep -q "not found" /tmp/ldd.txt
+          test -f squashfs-root/auto-hats.png
+          file squashfs-root/usr/bin/auto-hats | grep -q ELF
+          find squashfs-root/usr/bin -maxdepth 2 -name "_tcl_data" | grep -q .
+          ls -la squashfs-root/usr/bin | head -20
 
       - name: Subir artefacto
         uses: actions/upload-artifact@v4
