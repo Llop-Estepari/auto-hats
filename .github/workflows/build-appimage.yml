@@ -41,6 +41,7 @@ jobs:
       - name: Calcular versión
         id: version
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           else
@@ -84,6 +85,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             dist/*.AppImage \
+            -R "$GITHUB_REPOSITORY" \
             --title "Auto HATS ${{ steps.version.outputs.value }}" \
             --notes "AppImage para Linux (x86_64), compilado en Arch Linux."
 
@@ -129,4 +131,4 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$env:GITHUB_REF_NAME" "dist\Auto-HATS-windows-x64.zip" --clobber
+        run: gh release upload "$env:GITHUB_REF_NAME" "dist\Auto-HATS-windows-x64.zip" -R "$env:GITHUB_REPOSITORY" --clobber
