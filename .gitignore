@@ -1,0 +1,24 @@
+# Salidas de PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Configuración local del usuario
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Sistema
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Editores
+.vscode/
+.idea/
