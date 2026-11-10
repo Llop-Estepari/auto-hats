@@ -48,8 +48,9 @@ artefacto de la ejecución y, si se sube un tag `v*`, se publica como release.
 Para compilarlo localmente en Arch:
 
 ```bash
-sudo pacman -S --needed python tk pyinstaller squashfs-tools zstd file desktop-file-utils curl
-./packaging/build-appimage.sh
+sudo pacman -S --needed python tk squashfs-tools zstd file desktop-file-utils curl
+python -m venv .venv && .venv/bin/pip install pyinstaller
+PATH="$PWD/.venv/bin:$PATH" ./packaging/build-appimage.sh
 ```
 
 El archivo se genera en `dist/Auto-HATS-<versión>-x86_64.AppImage`.

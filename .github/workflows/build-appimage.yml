@@ -29,8 +29,14 @@ jobs:
       - name: Instalar dependencias
         run: |
           pacman -Syu --noconfirm --needed \
-            python tk pyinstaller squashfs-tools zstd file \
+            python tk squashfs-tools zstd file \
             desktop-file-utils curl git github-cli
+
+      - name: Instalar PyInstaller
+        run: |
+          python -m venv /opt/venv
+          /opt/venv/bin/pip install --upgrade pip pyinstaller
+          /opt/venv/bin/pyinstaller --version
 
       - name: Calcular versión
         id: version
@@ -47,6 +53,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.value }}
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
+          export PATH="/opt/venv/bin:$PATH"
           chmod +x packaging/build-appimage.sh
           ./packaging/build-appimage.sh
 

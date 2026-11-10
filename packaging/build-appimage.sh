@@ -3,7 +3,8 @@
 # Pensado para ejecutarse en Arch Linux (o en el contenedor archlinux del CI).
 #
 # Dependencias:
-#   sudo pacman -S --needed python tk pyinstaller squashfs-tools zstd file desktop-file-utils curl
+#   sudo pacman -S --needed python tk squashfs-tools zstd file desktop-file-utils curl
+#   python -m venv .venv && .venv/bin/pip install pyinstaller
 #
 # Uso:
 #   ./packaging/build-appimage.sh            # usa la versión de git describe
