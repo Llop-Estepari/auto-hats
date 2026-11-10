@@ -67,7 +67,46 @@ pip install pyinstaller
 pyinstaller auto-hats.spec
 ```
 
-El ejecutable se genera en `dist/auto-hats.exe`.
+Se genera una carpeta `dist/auto-hats/` con `auto-hats.exe` y sus dependencias.
+
+Para distribuirla:
+
+```powershell
+Compress-Archive -Path dist\auto-hats\* -DestinationPath dist\Auto-HATS-windows-x64.zip -Force
+```
+
+El `.spec` compila en modo **onedir**, **sin UPX** y con recurso de versión; esa
+combinación evita la mayoría de falsos positivos de antivirus. Si necesitas un
+único archivo:
+
+```powershell
+pyinstaller --onefile --windowed --noupx --name auto-hats `
+    --icon icon.ico `
+    --add-data "icon.ico;." --add-data "auto-hats.png;." `
+    --version-file packaging\version_info.txt auto-hats.py
+```
+
+## Falsos positivos de antivirus (Windows)
+
+Si Windows Defender detecta el ejecutable como `Trojan:Win32/Wacatac.B!ml` (o
+similar), es un **falso positivo** habitual de los binarios generados con
+PyInstaller. El binario de este repositorio se compila sin UPX y con metadatos
+de versión para minimizarlo, y se verifica con `MpCmdRun -Scan` antes de
+publicarse.
+
+Si aun así ocurre:
+
+1. Comprueba que descargaste el archivo del release oficial de este repositorio.
+2. Desbloquea el archivo antes de ejecutarlo:
+   ```powershell
+   Unblock-File .\auto-hats.exe
+   ```
+3. Envía el falso positivo a Microsoft:
+   <https://www.microsoft.com/en-us/wdsi/filesubmission>
+
+La solución definitiva es **firmar el ejecutable** con un certificado de firma
+de código; sin firma, SmartScreen y algunos antivirus seguirán mostrando avisos
+la primera vez que se ejecute en un equipo nuevo.
 
 ## Estructura del proyecto
 
