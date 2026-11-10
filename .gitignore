@@ -22,3 +22,7 @@ desktop.ini
 # Editores
 .vscode/
 .idea/
+
+# Informes de compilación fallida (Nuitka y otros)
+nuitka-crash-report.xml
+
