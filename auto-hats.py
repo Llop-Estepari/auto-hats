@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -86,12 +87,97 @@ def obtener_unidades_con_nombre():
                     unidades.append(drive_letter)
             bitmask >>= 1
     else:
-        media_path = "/media" if os.path.exists("/media") else "/Volumes"
-        if os.path.exists(media_path):
-            for d in os.listdir(media_path):
-                full_path = os.path.join(media_path, d)
-                unidades.append(f"{full_path} [{d}]")
+        usuario = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+        bases = []
+        if usuario:
+            bases.append(f"/run/media/{usuario}")
+        bases.extend(["/media", "/mnt", "/Volumes"])
+        vistos = []
+        for base in bases:
+            if not os.path.isdir(base):
+                continue
+            for d in sorted(os.listdir(base)):
+                full_path = os.path.join(base, d)
+                if full_path in vistos or not os.path.isdir(full_path):
+                    continue
+                vistos.append(full_path)
+                etiqueta = d
+                if base == "/media":
+                    subdirs = [x for x in os.listdir(full_path) if os.path.isdir(os.path.join(full_path, x))]
+                    if len(subdirs) == 1:
+                        etiqueta = subdirs[0]
+                        full_path = os.path.join(full_path, subdirs[0])
+                        vistos.append(full_path)
+                unidades.append(f"{full_path} [{etiqueta}]")
     return unidades
+
+def _ejecutar(cmd):
+    """Ejecuta un comando sin shell y devuelve el resultado (o None si falta el binario)."""
+    if shutil.which(cmd[0]) is None:
+        return None
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+def resolver_dispositivo_linux(punto_montaje):
+    """Obtiene el dispositivo de bloque (/dev/sdX1) asociado a un punto de montaje."""
+    if shutil.which("findmnt") is None:
+        raise Exception("Falta el comando 'findmnt' (paquete util-linux).")
+    res = subprocess.run(
+        ["findmnt", "-n", "-o", "SOURCE", "--target", punto_montaje],
+        capture_output=True, text=True
+    )
+    device = res.stdout.strip().splitlines()[0] if res.stdout.strip() else ""
+    if res.returncode != 0 or not device.startswith("/dev/"):
+        raise Exception(
+            f"No se pudo determinar el dispositivo de '{punto_montaje}'.\n"
+            "Asegúrate de que la unidad está montada y es un dispositivo de bloque."
+        )
+    return device
+
+def desmontar_linux(device, punto_montaje):
+    """Desmonta la unidad usando udisksctl y, si falla, pkexec umount."""
+    res = _ejecutar(["udisksctl", "unmount", "-b", device])
+    if res is not None and res.returncode == 0:
+        return
+    res = _ejecutar(["pkexec", "umount", punto_montaje])
+    if res is None or res.returncode != 0:
+        detalle = (res.stderr or res.stdout).strip() if res is not None else "pkexec no está instalado"
+        raise Exception(f"No se pudo desmontar {punto_montaje}: {detalle}")
+
+def formatear_linux(punto_montaje):
+    """Formatea la unidad montada en FAT32 y devuelve el punto de montaje resultante."""
+    device = resolver_dispositivo_linux(punto_montaje)
+    desmontar_linux(device, punto_montaje)
+
+    cmd = ["mkfs.vfat", "-F", "32", "-n", "HATS_DISK", device]
+    if shutil.which("mkfs.vfat") is None:
+        raise Exception(
+            "Falta 'mkfs.vfat'. Instálalo con:\n\n"
+            "    sudo pacman -S dosfstools\n\n"
+            "También necesitas 'udisks2' y 'polkit' para montar y desmontar sin sudo."
+        )
+
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        res = _ejecutar(["pkexec"] + cmd)
+        if res is None:
+            raise Exception(f"No se pudo formatear {device}: hace falta 'pkexec' (paquete polkit) o permisos de root.")
+        if res.returncode != 0:
+            raise Exception(f"Error al formatear {device}:\n{(res.stderr or res.stdout).strip()}")
+
+    nuevo_punto = punto_montaje
+    res = _ejecutar(["udisksctl", "mount", "-b", device])
+    if res is not None and res.returncode == 0:
+        coincidencia = re.search(r"\bat (.+?)\.?\s*$", res.stdout.strip())
+        if coincidencia:
+            nuevo_punto = coincidencia.group(1).rstrip(".")
+    else:
+        res = _ejecutar(["pkexec", "mount", device, punto_montaje])
+        if res is None or res.returncode != 0:
+            detalle = (res.stderr or res.stdout).strip() if res is not None else "pkexec no está instalado"
+            raise Exception(
+                f"El disco se formateó pero no se pudo volver a montar {device}:\n{detalle}"
+            )
+    return nuevo_punto
 
 class AppHatsPersistentFormatter:
     def __init__(self, root):
@@ -101,8 +187,12 @@ class AppHatsPersistentFormatter:
         self.root.resizable(False, False)
 
         try:
-            icon_path = resource_path("icon.ico")
-            self.root.iconbitmap(icon_path)
+            if sys.platform == "win32":
+                self.root.iconbitmap(resource_path("icon.ico"))
+            else:
+                icono = tk.PhotoImage(file=resource_path("auto-hats.png"))
+                self.root.iconphoto(True, icono)
+                self._icono = icono
         except Exception:
             pass
 
@@ -156,7 +246,7 @@ class AppHatsPersistentFormatter:
             return
 
         guardar_url_persistente(current_url)
-        target_drive = seleccion.split()[0]
+        target_drive = seleccion.rsplit(" [", 1)[0] if " [" in seleccion else seleccion
 
         confirm = messagebox.askyesno(
             "ADVERTENCIA CRÍTICA", 
@@ -186,10 +276,7 @@ class AppHatsPersistentFormatter:
                 if result.returncode != 0:
                     raise Exception(f"Error al formatear mediante PowerShell: {result.stderr}")
             else:
-                cmd = f"mkfs.vfat -F 32 -n HATS_DISK {target_drive}"
-                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-                if result.returncode != 0:
-                    raise Exception(f"Error al formatear: {result.stderr}")
+                target_drive = formatear_linux(target_drive)
 
             self.btn_ejecutar.config(text="Copiando archivos al disco...")
             self.root.update()

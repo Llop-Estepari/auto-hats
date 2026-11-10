@@ -1,0 +1,131 @@
+name: Build AppImage
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: appimage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  appimage:
+    name: Arch Linux AppImage
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Instalar dependencias
+        run: |
+          pacman -Syu --noconfirm --needed \
+            python tk squashfs-tools zstd file \
+            desktop-file-utils curl git github-cli
+
+      - name: Instalar PyInstaller
+        run: |
+          python -m venv /opt/venv
+          /opt/venv/bin/pip install --upgrade pip pyinstaller
+          /opt/venv/bin/pyinstaller --version
+
+      - name: Calcular versión
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compilar AppImage
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          export PATH="/opt/venv/bin:$PATH"
+          chmod +x packaging/build-appimage.sh
+          ./packaging/build-appimage.sh
+
+      - name: Verificar AppImage
+        run: |
+          cd dist
+          unset APPIMAGE_EXTRACT_AND_RUN
+          ./Auto-HATS-*.AppImage --appimage-extract > /dev/null
+          test -x squashfs-root/AppRun
+          test -x squashfs-root/usr/bin/auto-hats
+          test -f squashfs-root/auto-hats.desktop
+          test -d squashfs-root/usr/bin/_tcl_data
+          file squashfs-root/usr/bin/auto-hats
+          ldd squashfs-root/usr/bin/auto-hats | tee /tmp/ldd.txt
+          ! grep -q "not found" /tmp/ldd.txt
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: Auto-HATS-AppImage
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+      - name: Publicar release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.AppImage \
+            --title "Auto HATS ${{ steps.version.outputs.value }}" \
+            --notes "AppImage para Linux (x86_64), compilado en Arch Linux."
+
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    needs: appimage
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Instalar PyInstaller
+        run: pip install --upgrade pip pyinstaller
+
+      - name: Compilar
+        run: python -m PyInstaller --noconfirm --clean --log-level WARN auto-hats.spec
+
+      - name: Empaquetar
+        run: Compress-Archive -Path dist\auto-hats\* -DestinationPath dist\Auto-HATS-windows-x64.zip -Force
+
+      - name: Comprobar que el ejecutable arranca
+        continue-on-error: true
+        run: |
+          $p = Start-Process -FilePath "dist\auto-hats\auto-hats.exe" -PassThru
+          Start-Sleep -Seconds 5
+          if ($p.HasExited) { throw "El ejecutable terminó con código $($p.ExitCode)" }
+          Stop-Process -Id $p.Id -Force
+          "OK: el ejecutable arrancó correctamente"
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: Auto-HATS-Windows
+          path: dist/Auto-HATS-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Adjuntar al release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$env:GITHUB_REF_NAME" "dist\Auto-HATS-windows-x64.zip" --clobber
