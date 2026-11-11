@@ -7,13 +7,42 @@ versión de **HATS** desde un release de GitHub, formatea una unidad extraíble 
 > ⚠️ **Advertencia:** la aplicación borra **todos** los datos de la unidad
 > seleccionada. Verifica dos veces la letra de la unidad antes de continuar.
 
+## Instalación con un comando
+
+**Linux** (instala en `~/.local`, sin sudo):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Llop-Estepari/auto-hats/main/install.sh | bash
+```
+
+Para desinstalar:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Llop-Estepari/auto-hats/main/install.sh | bash -s -- --uninstall
+```
+
+**Windows** (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Llop-Estepari/auto-hats/main/install.ps1 | iex"
+```
+
+Para desinstalar, descarga el script y ejecútalo con `-Uninstall`.
+
 ## Características
 
+- Interfaz oscura con acento verde, adaptada a Windows y Linux.
+- En Linux el formateo se hace mediante UDisks2, por lo que no pide contraseña
+  en sesiones locales activas.
 - Detecta automáticamente las unidades disponibles (con su etiqueta de volumen).
 - Permite editar y guardar la URL del ZIP del release (se persiste en `config.json`).
 - Descarga y descomprime el ZIP en una carpeta temporal.
 - Formatea la unidad destino a FAT32 (`format` en Windows, `mkfs.vfat` en Linux/macOS).
 - Copia el contenido descargado a la unidad formateada.
+- Indicador de pasos (Descargar → Formatear → Copiar) y barra de progreso en tiempo
+  real para la descarga y la copia.
+- El proceso se ejecuta en segundo plano: la ventana no se congela y se puede
+  seguir viendo el avance.
 
 ## Requisitos
 
@@ -34,10 +63,17 @@ python auto-hats.py
 
 1. Selecciona la unidad de disco destino.
 2. Revisa o edita la URL del ZIP del release.
-3. Pulsa **Guardar URL, Formatear a FAT32 y Copiar** y confirma la advertencia.
+3. Pulsa **Formatear y copiar** y confirma la advertencia.
+
+Durante el proceso la tarjeta **Progreso** muestra el paso actual, el porcentaje
+global y una barra que avanza con la descarga y la copia. En el formateo, que no
+reporta progreso propio, la barra pasa a modo animado hasta que termina.
 
 En Linux la unidad se desmonta, se formatea con `mkfs.vfat` (pidiendo permisos
-con `pkexec` si hace falta) y se vuelve a montar con `udisksctl`.
+con `pkexec` si hace falta) y se vuelve a montar con `udisksctl`. La lista de
+unidades muestra únicamente discos extraíbles (USB/SD) con su etiqueta,
+dispositivo y tamaño; el botón **↻** actualiza la lista después de conectar la
+unidad.
 
 ## AppImage para Linux (Arch)
 
