@@ -1,7 +1,7 @@
 # Auto HATS
 
-Utilidad de escritorio con interfaz gráfica (Tkinter) que descarga la última
-versión de **HATS** desde un release de GitHub, formatea una unidad extraíble a
+Utilidad de escritorio con interfaz gráfica (Tkinter) que detecta el último
+release estable de **HATS** en GitHub, formatea una unidad extraíble a
 **FAT32** y copia los archivos descargados en ella.
 
 > ⚠️ **Advertencia:** la aplicación borra **todos** los datos de la unidad
@@ -35,7 +35,16 @@ Para desinstalar, descarga el script y ejecútalo con `-Uninstall`.
 - En Linux el formateo se hace mediante UDisks2, por lo que no pide contraseña
   en sesiones locales activas.
 - Detecta automáticamente las unidades disponibles (con su etiqueta de volumen).
-- Permite editar y guardar la URL del ZIP del release (se persiste en `config.json`).
+- Detecta automáticamente el último release estable de HATS en GitHub.
+- Omite los releases marcados como preliminares y los que llevan `PRE-RELEASE`
+  al inicio del nombre.
+- Permite volver a consultar el último release con el botón **↻**.
+- Muestra el firmware soportado en un tooltip al pasar el ratón por el botón
+  **i** del release, con un aviso si no se puede leer.
+- Comprueba al arrancar si hay una versión nueva de Auto HATS y muestra un aviso
+  solo cuando existe una actualización.
+- Permite actualizar directamente desde la app: reemplaza el AppImage en Linux
+  o los archivos instalados en Windows y se reinicia automáticamente.
 - Descarga y descomprime el ZIP en una carpeta temporal.
 - Formatea la unidad destino a FAT32 (`format` en Windows, `mkfs.vfat` en Linux/macOS).
 - Copia el contenido descargado a la unidad formateada.
@@ -62,7 +71,8 @@ python auto-hats.py
 ```
 
 1. Selecciona la unidad de disco destino.
-2. Revisa o edita la URL del ZIP del release.
+2. Comprueba el release detectado. Pasa el ratón por el botón **i** para ver el
+   firmware soportado y usa **↻** si quieres volver a consultar GitHub.
 3. Pulsa **Formatear y copiar** y confirma la advertencia.
 
 Durante el proceso la tarjeta **Progreso** muestra el paso actual, el porcentaje
@@ -74,6 +84,18 @@ con `pkexec` si hace falta) y se vuelve a montar con `udisksctl`. La lista de
 unidades muestra únicamente discos extraíbles (USB/SD) con su etiqueta,
 dispositivo y tamaño; el botón **↻** actualiza la lista después de conectar la
 unidad.
+
+El firmware soportado se lee del texto del release en GitHub (la línea
+`Supported Firmware`). Si algún día cambia esa etiqueta o falta el dato, el
+tooltip muestra `Supported Firmware: no disponible` en lugar de quedarse vacío.
+El último release detectado se guarda en `config.json` para poder usarlo si
+GitHub no responde en ese momento.
+
+Al iniciar, Auto HATS consulta también su propio último release. Si hay una
+versión más reciente, aparece un aviso con el botón **Actualizar**. En Linux
+reemplaza el AppImage en uso y se reinicia; en Windows actualiza la carpeta de
+instalación mediante un script temporal. Si la app se ejecuta desde el código
+fuente o desde una ubicación no instalada, el botón abre la página del release.
 
 ## AppImage para Linux (Arch)
 
@@ -95,6 +117,10 @@ El archivo se genera en `dist/Auto-HATS-<versión>-x86_64.AppImage`.
 chmod +x dist/Auto-HATS-*.AppImage
 ./dist/Auto-HATS-*.AppImage
 ```
+
+Al publicar una nueva versión, actualiza `APP_VERSION` en `auto-hats.py` y
+`packaging/version_info.txt`, y crea el tag `vX.Y.Z`. La comprobación de
+actualizaciones usa ese valor comparándolo con el último release de GitHub.
 
 ## Compilar el ejecutable de Windows
 

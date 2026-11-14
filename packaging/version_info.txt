@@ -1,8 +1,8 @@
 # Recurso de versión para el ejecutable de Windows (VS_VERSION_INFO).
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(1, 2, 0, 0),
+    prodvers=(1, 2, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -18,12 +18,12 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'Llop-Estepari'),
             StringStruct(u'FileDescription', u'Auto HATS - Descargador y formateador FAT32'),
-            StringStruct(u'FileVersion', u'1.0.0.0'),
+            StringStruct(u'FileVersion', u'1.2.0.0'),
             StringStruct(u'InternalName', u'auto-hats'),
             StringStruct(u'LegalCopyright', u'Copyright (c) 2026 Llop-Estepari. Licencia MIT.'),
             StringStruct(u'OriginalFilename', u'auto-hats.exe'),
             StringStruct(u'ProductName', u'Auto HATS'),
-            StringStruct(u'ProductVersion', u'1.0.0.0')
+            StringStruct(u'ProductVersion', u'1.2.0.0')
           ]
         )
       ]

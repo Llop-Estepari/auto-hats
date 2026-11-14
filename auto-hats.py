@@ -8,10 +8,12 @@ import threading
 import time
 import queue
 import zipfile
+import urllib.error
 import urllib.request
 import ctypes
 import json
 import tkinter as tk
+import webbrowser
 from tkinter import ttk, font as tkfont, filedialog
 
 # Paleta del tema oscuro (a juego con el icono verde de la aplicación)
@@ -44,7 +46,19 @@ def obtener_ruta_config():
     return os.path.join(app_dir, 'config.json')
 
 CONFIG_FILE = obtener_ruta_config()
-DEFAULT_URL = "https://github.com/sthetix/HATS/releases/download/HATS-2026-11-09-5bf0df1/HATS-2026-11-09-5bf0df1.zip"
+APP_VERSION = "1.2.0"
+GITHUB_APP_REPO = "Llop-Estepari/auto-hats"
+GITHUB_APP_RELEASES_API = (
+    f"https://api.github.com/repos/{GITHUB_APP_REPO}/releases/latest"
+)
+GITHUB_RELEASES_API = (
+    "https://api.github.com/repos/sthetix/HATS/releases?per_page=100"
+)
+GITHUB_HEADERS = {
+    "User-Agent": "AutoHATS",
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
 
 def resource_path(relative_path):
     """Obtiene la ruta absoluta al recurso compatible con PyInstaller."""
@@ -54,10 +68,16 @@ def resource_path(relative_path):
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
-CONFIG_DEFAULT = {"modo": "release", "url": DEFAULT_URL, "carpeta": ""}
+CONFIG_DEFAULT = {
+    "modo": "release",
+    "url": "",
+    "carpeta": "",
+    "release_name": "",
+    "firmware": "",
+}
 
 def cargar_config():
-    """Carga la configuración persistente (modo, URL y carpeta local)."""
+    """Carga la configuración persistente (modo, release y carpeta local)."""
     config = dict(CONFIG_DEFAULT)
     if os.path.exists(CONFIG_FILE):
         try:
@@ -70,6 +90,10 @@ def cargar_config():
                     config["url"] = data["url"].strip()
                 if isinstance(data.get("carpeta"), str):
                     config["carpeta"] = data["carpeta"]
+                if isinstance(data.get("release_name"), str):
+                    config["release_name"] = data["release_name"].strip()
+                if isinstance(data.get("firmware"), str):
+                    config["firmware"] = data["firmware"].strip()
                 # Compatibilidad con versiones anteriores (solo "url")
                 if "modo" not in data and isinstance(data.get("url"), str):
                     config["modo"] = "release"
@@ -84,14 +108,179 @@ def guardar_config(config):
             json.dump(
                 {
                     "modo": config.get("modo", "release"),
-                    "url": config.get("url", DEFAULT_URL),
+                    "url": config.get("url", ""),
                     "carpeta": config.get("carpeta", ""),
+                    "release_name": config.get("release_name", ""),
+                    "firmware": config.get("firmware", ""),
                 },
                 f,
                 indent=4,
             )
     except Exception as e:
         print(f"Error al guardar la configuración: {e}")
+
+def _limpiar_markdown(valor):
+    """Quita marcas de Markdown alrededor de un valor extraído."""
+    valor = (valor or "").strip()
+    valor = re.sub(r"^[\s*_`#>]+", "", valor)
+    valor = re.sub(r"[\s*_`]+$", "", valor)
+    return valor.strip()
+
+def _extraer_firmware(body):
+    """Obtiene el texto que sigue a 'Supported Firmware' en la descripción."""
+    if not isinstance(body, str) or not body.strip():
+        return None
+
+    # Solo miramos la cabecera del resumen para no confundirnos con el changelog.
+    cabecera = re.split(r"\r?\n---\s*(?:\r?\n|$)", body, maxsplit=1)[0]
+    lineas = cabecera.splitlines()
+    patron = re.compile(
+        r"(supported\s+firmware|firmware\s+(?:supported|support|compatibility)"
+        r"|supported\s+fw|compatible\s+firmware|firmware)\s*:?\s*(.*)",
+        re.IGNORECASE,
+    )
+
+    for indice, linea in enumerate(lineas):
+        # Evita confundir viñetas del changelog con la cabecera del resumen.
+        if linea.lstrip().startswith(("- ", "* ", "> ")):
+            continue
+        coincidencia = patron.search(linea)
+        if not coincidencia:
+            continue
+        valor = _limpiar_markdown(coincidencia.group(2))
+        if valor:
+            return valor
+        # Por si algún día ponen la etiqueta y el valor en líneas distintas.
+        for siguiente in lineas[indice + 1:]:
+            if not siguiente.strip():
+                continue
+            if siguiente.strip().startswith(("---", "#")):
+                break
+            valor = _limpiar_markdown(siguiente)
+            if valor:
+                return valor
+            break
+    return None
+
+def _nombre_release(release):
+    """Devuelve el nombre visible de un release."""
+    return (release.get("name") or release.get("tag_name") or "").strip()
+
+def _es_pre_release(release):
+    """Indica si un release debe descartarse por ser preliminar."""
+    if release.get("draft") or release.get("prerelease"):
+        return True
+    return bool(
+        re.match(r"^\s*pre[\s_-]*release\b", _nombre_release(release), re.IGNORECASE)
+    )
+
+def _consultar_github_json(url):
+    """Hace una petición a la API de GitHub y devuelve el JSON."""
+    peticion = urllib.request.Request(url, headers=GITHUB_HEADERS)
+    try:
+        with urllib.request.urlopen(peticion, timeout=20) as respuesta:
+            return json.loads(respuesta.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        if e.code in (403, 429):
+            raise Exception(
+                "GitHub ha limitado temporalmente las peticiones. "
+                "Espera unos minutos y vuelve a intentarlo."
+            ) from e
+        raise Exception(f"GitHub respondió con un error {e.code}.") from e
+    except urllib.error.URLError as e:
+        motivo = getattr(e, "reason", e)
+        raise Exception(f"No se pudo conectar con GitHub: {motivo}") from e
+    except TimeoutError as e:
+        raise Exception("GitHub tardó demasiado en responder.") from e
+    except ValueError as e:
+        raise Exception("GitHub devolvió una respuesta no válida.") from e
+
+def _version_tuple(texto):
+    """Convierte un tag o versión semántica en una tupla comparable."""
+    coincidencia = re.search(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", str(texto or ""))
+    if not coincidencia:
+        return (0, 0, 0)
+    return tuple(int(parte or 0) for parte in coincidencia.groups())
+
+def _hay_version_nueva(version_remota, version_local=APP_VERSION):
+    """Indica si la versión remota es más reciente que la local."""
+    return _version_tuple(version_remota) > _version_tuple(version_local)
+
+def _buscar_asset(assets, sufijo):
+    """Busca un asset por el final de su nombre."""
+    sufijo = (sufijo or "").lower()
+    for nombre, url in (assets or {}).items():
+        if nombre.lower().endswith(sufijo):
+            return url
+    return None
+
+def obtener_ultima_version_app():
+    """Consulta el último release de Auto HATS publicado en GitHub."""
+    datos = _consultar_github_json(GITHUB_APP_RELEASES_API)
+    if not isinstance(datos, dict):
+        return None
+    tag = (datos.get("tag_name") or datos.get("name") or "").strip()
+    if not tag:
+        return None
+    version = tag[1:] if tag.lower().startswith("v") else tag
+    assets = {
+        activo.get("name"): activo.get("browser_download_url")
+        for activo in (datos.get("assets") or [])
+        if activo.get("name") and activo.get("browser_download_url")
+    }
+    return {
+        "tag": tag,
+        "version": version,
+        "html_url": datos.get("html_url")
+        or f"https://github.com/{GITHUB_APP_REPO}/releases/latest",
+        "assets": assets,
+    }
+
+def obtener_ultimo_release():
+    """Consulta GitHub y devuelve el último release estable con un ZIP."""
+    datos = _consultar_github_json(GITHUB_RELEASES_API)
+
+    if not isinstance(datos, list):
+        raise Exception("GitHub devolvió una respuesta inesperada.")
+
+    datos.sort(
+        key=lambda release: (
+            release.get("published_at") or release.get("created_at") or ""
+        ),
+        reverse=True,
+    )
+
+    for release in datos:
+        if _es_pre_release(release):
+            continue
+
+        nombre = _nombre_release(release)
+        tag = (release.get("tag_name") or "").strip()
+        zips = [
+            activo
+            for activo in (release.get("assets") or [])
+            if (activo.get("name") or "").lower().endswith(".zip")
+            and activo.get("browser_download_url")
+        ]
+        if not zips:
+            continue
+
+        elegido = next(
+            (activo for activo in zips if activo.get("name") == f"{tag}.zip"),
+            zips[0],
+        )
+        return {
+            "name": nombre or tag or "Release sin nombre",
+            "tag": tag,
+            "url": elegido["browser_download_url"],
+            "firmware": _extraer_firmware(release.get("body")) or "",
+            "html_url": release.get("html_url") or "",
+            "published_at": release.get("published_at") or "",
+        }
+
+    raise Exception("No se encontró ningún release estable con un ZIP descargable.")
 
 def _tamano_legible(num_bytes):
     """Convierte un tamaño en bytes a un texto legible."""
@@ -377,6 +566,27 @@ def configurar_estilos(root):
         foreground=[("disabled", "#6f8a7a")],
     )
 
+    # Botón compacto para el aviso de actualización
+    estilo.configure(
+        "Update.TButton",
+        background=COLOR_ACCENT,
+        foreground=COLOR_ACCENT_TEXT,
+        font=(familia, 9, "bold"),
+        borderwidth=0,
+        focusthickness=0,
+        focuscolor=COLOR_ACCENT,
+        padding=(12, 7),
+    )
+    estilo.map(
+        "Update.TButton",
+        background=[
+            ("disabled", "#2a3a30"),
+            ("pressed", COLOR_ACCENT_PRESSED),
+            ("active", COLOR_ACCENT_HOVER),
+        ],
+        foreground=[("disabled", "#6f8a7a")],
+    )
+
     # Botón secundario
     estilo.configure(
         "Ghost.TButton",
@@ -507,14 +717,27 @@ class AppHatsPersistentFormatter:
 
         self.familia = configurar_estilos(root)
         self.cola = queue.Queue()
+        self.cola_release = queue.Queue()
+        self.cola_app = queue.Queue()
         self.procesando = False
         self._after_id = None
         self._indeterminado = False
         self._paso_actual = 0
         self._icono = None
         self.unidades = {}
+        self._consultando_release = False
+        self._release_after_id = None
+        self._comprobando_app = False
+        self._actualizando = False
+        self._app_after_id = None
+        self.actualizacion_info = None
+        self._tooltip = None
+        self._tooltip_after = None
+        self._tooltip_texto = ""
+        self._info_fg = COLOR_MUTED
 
         self.config = cargar_config()
+        self.release_info = self._release_desde_config(self.config)
         self.modo_origen = self.config.get("modo", "release")
         if self.modo_origen not in ("release", "local"):
             self.modo_origen = "release"
@@ -523,7 +746,10 @@ class AppHatsPersistentFormatter:
         self._cargar_icono()
         self._construir_interfaz()
         self.refrescar_unidades()
+        self._actualizar_release_ui()
         self._centrar_ventana()
+        self._consultar_release_async()
+        self._consultar_actualizacion_async()
 
     # ------------------------------------------------------------------ UI
     def _cargar_icono(self):
@@ -542,6 +768,24 @@ class AppHatsPersistentFormatter:
         if modo == "local":
             return ("Formatear", "Copiar")
         return ("Descargar", "Formatear", "Copiar")
+
+    @staticmethod
+    def _release_desde_config(config):
+        """Reconstruye el último release conocido a partir de la configuración."""
+        url = (config.get("url") or "").strip()
+        if not url:
+            return None
+        nombre = (config.get("release_name") or "").strip()
+        if not nombre:
+            nombre = os.path.splitext(os.path.basename(url.split("?")[0]))[0]
+        return {
+            "name": nombre or "Release guardado",
+            "tag": "",
+            "url": url,
+            "firmware": (config.get("firmware") or "").strip(),
+            "html_url": "",
+            "published_at": "",
+        }
 
     def _seccion(self, parent, titulo, pady=(16, 0)):
         tarjeta = tk.Frame(
@@ -577,12 +821,40 @@ class AppHatsPersistentFormatter:
         contenedor = tk.Frame(self.root, bg=COLOR_BG)
         contenedor.pack(fill="both", expand=True, padx=24, pady=22)
 
+        # Aviso de actualización (oculto hasta saber si hay una nueva versión)
+        self.panel_actualizacion = tk.Frame(
+            contenedor,
+            bg=COLOR_ACCENT_SOFT,
+            highlightbackground=COLOR_ACCENT,
+            highlightthickness=1,
+        )
+        fila_actualizacion = tk.Frame(self.panel_actualizacion, bg=COLOR_ACCENT_SOFT)
+        fila_actualizacion.pack(fill="x", padx=14, pady=10)
+        self.lbl_actualizacion = tk.Label(
+            fila_actualizacion,
+            text="",
+            bg=COLOR_ACCENT_SOFT,
+            fg=COLOR_ACCENT,
+            font=(self.familia, 9, "bold"),
+            anchor="w",
+            justify="left",
+            wraplength=430,
+        )
+        self.lbl_actualizacion.pack(side="left", fill="x", expand=True)
+        self.btn_actualizar = ttk.Button(
+            fila_actualizacion,
+            text="Actualizar",
+            style="Update.TButton",
+            command=self._actualizar_aplicacion,
+        )
+        self.btn_actualizar.pack(side="right", padx=(12, 0))
+
         # Origen de los archivos
-        tarjeta = self._seccion(contenedor, "Origen de los archivos")
+        self.tarjeta_origen = tarjeta = self._seccion(contenedor, "Origen de los archivos")
         fila_modo = tk.Frame(tarjeta, bg=COLOR_CARD)
         fila_modo.pack(fill="x", padx=16, pady=(0, 8))
         self.btn_modo_release = ttk.Button(
-            fila_modo, text="Release (URL)", style="Ghost.TButton",
+            fila_modo, text="Release de GitHub", style="Ghost.TButton",
             command=lambda: self._cambiar_modo("release"),
         )
         self.btn_modo_release.pack(side="left")
@@ -594,21 +866,51 @@ class AppHatsPersistentFormatter:
 
         self.panel_release = tk.Frame(tarjeta, bg=COLOR_CARD)
         self.panel_release.pack(fill="x")
-        self.entry_url = ttk.Entry(
-            self.panel_release,
-            style="Dark.TEntry",
-            font=(self.familia, 10),
+        fila_release = tk.Frame(self.panel_release, bg=COLOR_CARD)
+        fila_release.pack(fill="x", padx=16)
+        self.lbl_release = tk.Label(
+            fila_release,
+            text="Buscando el último release…",
+            bg=COLOR_CARD,
+            fg=COLOR_TEXT,
+            font=(self.familia, 10, "bold"),
+            anchor="w",
         )
-        self.entry_url.pack(fill="x", padx=16)
-        self.entry_url.insert(0, self.config.get("url", DEFAULT_URL))
-        tk.Label(
+        self.lbl_release.pack(side="left", fill="x", expand=True)
+
+        self.btn_release_info = tk.Label(
+            fila_release,
+            text="i",
+            bg=COLOR_CARD_ALT,
+            fg=COLOR_MUTED,
+            font=(self.familia, 9, "bold"),
+            width=2,
+            padx=2,
+            pady=1,
+            highlightthickness=1,
+            highlightbackground=COLOR_BORDER,
+            cursor="hand2",
+        )
+        self.btn_release_info.bind("<Enter>", self._al_entrar_info)
+        self.btn_release_info.bind("<Leave>", self._al_salir_info)
+
+        self.btn_release_refresh = ttk.Button(
+            fila_release, text="↻", width=3, style="Ghost.TButton",
+            command=self._consultar_release_async,
+        )
+        self.btn_release_refresh.pack(side="left", padx=(8, 0))
+
+        self.lbl_release_estado = tk.Label(
             self.panel_release,
-            text="Se guarda automáticamente para la próxima vez.",
+            text="Consultando el último release estable en GitHub…",
             bg=COLOR_CARD,
             fg=COLOR_MUTED,
             font=(self.familia, 9),
             anchor="w",
-        ).pack(fill="x", padx=16, pady=(4, 12))
+            justify="left",
+            wraplength=520,
+        )
+        self.lbl_release_estado.pack(fill="x", padx=16, pady=(6, 12))
 
         self.panel_local = tk.Frame(tarjeta, bg=COLOR_CARD)
         self.panel_local.pack(fill="x")
@@ -661,24 +963,6 @@ class AppHatsPersistentFormatter:
             font=(self.familia, 9),
             anchor="w",
         ).pack(fill="x", padx=16, pady=(2, 12))
-
-        # URL del release
-        tarjeta = self._seccion(contenedor, "URL del release")
-        self.entry_url = ttk.Entry(
-            tarjeta,
-            style="Dark.TEntry",
-            font=(self.familia, 10),
-        )
-        self.entry_url.pack(fill="x", padx=16)
-        self.entry_url.insert(0, self.config.get("url", DEFAULT_URL))
-        tk.Label(
-            tarjeta,
-            text="Se guarda automáticamente para la próxima vez.",
-            bg=COLOR_CARD,
-            fg=COLOR_MUTED,
-            font=(self.familia, 9),
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(4, 12))
 
         # Progreso
         tarjeta = self._seccion(contenedor, "Progreso")
@@ -760,9 +1044,493 @@ class AppHatsPersistentFormatter:
             self.panel_release.pack_forget()
             self.panel_local.pack(fill="x")
 
+    def _actualizar_release_ui(self):
+        """Pinta el release detectado y prepara el texto del tooltip."""
+        self._cancelar_tooltip()
+        info = self.release_info
+        if not info:
+            self.lbl_release.config(text="Sin release detectado", fg=COLOR_WARNING)
+            self.btn_release_info.pack_forget()
+            self._info_fg = COLOR_MUTED
+            return
+
+        self.lbl_release.config(text=info.get("name") or "Release sin nombre", fg=COLOR_TEXT)
+        firmware = (info.get("firmware") or "").strip()
+        if firmware:
+            self._tooltip_texto = f"Supported Firmware: {firmware}"
+            self._info_fg = COLOR_TEXT
+        else:
+            self._tooltip_texto = (
+                "Supported Firmware: no disponible\n"
+                "No se pudo leer la versión en la descripción del release."
+            )
+            self._info_fg = COLOR_WARNING
+
+        self.btn_release_info.config(
+            fg=self._info_fg,
+            bg=COLOR_CARD_ALT,
+            highlightbackground=COLOR_BORDER,
+        )
+        if not self.btn_release_info.winfo_manager():
+            self.btn_release_info.pack(
+                side="left", padx=(8, 0), before=self.btn_release_refresh
+            )
+
+    def _al_entrar_info(self, _evento=None):
+        self.btn_release_info.config(
+            bg=COLOR_ACCENT_SOFT,
+            fg=COLOR_ACCENT,
+            highlightbackground=COLOR_ACCENT,
+        )
+        self._programar_tooltip()
+
+    def _al_salir_info(self, _evento=None):
+        self.btn_release_info.config(
+            bg=COLOR_CARD_ALT,
+            fg=self._info_fg,
+            highlightbackground=COLOR_BORDER,
+        )
+        self._cancelar_tooltip()
+
+    def _programar_tooltip(self):
+        self._cancelar_tooltip()
+        self._tooltip_after = self.root.after(250, self._mostrar_tooltip)
+
+    def _mostrar_tooltip(self):
+        self._tooltip_after = None
+        if not getattr(self, "_tooltip_texto", ""):
+            return
+        self._cancelar_tooltip()
+
+        tooltip = tk.Toplevel(self.root)
+        tooltip.wm_overrideredirect(True)
+        tooltip.configure(bg=COLOR_BORDER)
+        try:
+            tooltip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        tk.Label(
+            tooltip,
+            text=self._tooltip_texto,
+            bg=COLOR_CARD_ALT,
+            fg=COLOR_TEXT,
+            font=(self.familia, 9),
+            justify="left",
+            anchor="w",
+            padx=10,
+            pady=7,
+        ).pack(padx=1, pady=1)
+
+        tooltip.update_idletasks()
+        ancho = tooltip.winfo_reqwidth()
+        alto = tooltip.winfo_reqheight()
+        x = self.btn_release_info.winfo_rootx()
+        y = self.btn_release_info.winfo_rooty() - alto - 8
+        if y < 0:
+            y = (
+                self.btn_release_info.winfo_rooty()
+                + self.btn_release_info.winfo_height()
+                + 8
+            )
+        x = max(0, min(x, self.root.winfo_screenwidth() - ancho))
+        tooltip.geometry(f"+{x}+{y}")
+        self._tooltip = tooltip
+
+    def _cancelar_tooltip(self):
+        if self._tooltip_after is not None:
+            try:
+                self.root.after_cancel(self._tooltip_after)
+            except Exception:
+                pass
+            self._tooltip_after = None
+        if self._tooltip is not None:
+            try:
+                self._tooltip.destroy()
+            except Exception:
+                pass
+            self._tooltip = None
+
+    def _consultar_release_async(self):
+        """Consulta el último release en segundo plano."""
+        if self._consultando_release or self.procesando or self._actualizando:
+            return
+        self._consultando_release = True
+        self.btn_release_refresh.config(state="disabled")
+        self.lbl_release_estado.config(
+            text="Consultando el último release estable en GitHub…",
+            fg=COLOR_MUTED,
+        )
+        threading.Thread(target=self._trabajo_release, daemon=True).start()
+        self._release_after_id = self.root.after(100, self._poll_release)
+
+    def _trabajo_release(self):
+        try:
+            info = obtener_ultimo_release()
+        except Exception as e:
+            self.cola_release.put(("error", str(e)))
+        else:
+            self.cola_release.put(("ok", info))
+
+    def _poll_release(self):
+        self._release_after_id = None
+        try:
+            tipo, dato = self.cola_release.get_nowait()
+        except queue.Empty:
+            if self._consultando_release:
+                self._release_after_id = self.root.after(100, self._poll_release)
+            return
+
+        self._consultando_release = False
+        self.btn_release_refresh.config(state="normal")
+
+        if tipo == "ok":
+            self.release_info = dato
+            self._actualizar_release_ui()
+            firmware = (dato.get("firmware") or "").strip()
+            if firmware:
+                self.lbl_release_estado.config(
+                    text="Último release estable detectado.", fg=COLOR_MUTED
+                )
+            else:
+                self.lbl_release_estado.config(
+                    text="Release detectado, pero no se pudo leer el firmware soportado.",
+                    fg=COLOR_WARNING,
+                )
+            self._guardar_config_actual()
+        else:
+            if self.release_info:
+                self.lbl_release_estado.config(
+                    text=(
+                        f"No se pudo consultar GitHub: {dato}\n"
+                        "Se usará el último release guardado."
+                    ),
+                    fg=COLOR_WARNING,
+                )
+            else:
+                self.lbl_release_estado.config(
+                    text=f"No se pudo consultar GitHub: {dato}", fg=COLOR_ERROR
+                )
+            self._actualizar_release_ui()
+
+    # ---------------------------------------------------- app update
+    def _consultar_actualizacion_async(self):
+        """Comprueba si hay una versión nueva de Auto HATS."""
+        if self._comprobando_app or self._actualizando:
+            return
+        self._comprobando_app = True
+        threading.Thread(
+            target=self._trabajo_comprobar_actualizacion, daemon=True
+        ).start()
+        self._programar_poll_app()
+
+    def _trabajo_comprobar_actualizacion(self):
+        try:
+            info = obtener_ultima_version_app()
+        except Exception:
+            self.cola_app.put(("app_check_error", None))
+        else:
+            self.cola_app.put(("app_check", info))
+
+    def _programar_poll_app(self):
+        if self._app_after_id is not None:
+            try:
+                self.root.after_cancel(self._app_after_id)
+            except Exception:
+                pass
+        self._app_after_id = self.root.after(100, self._poll_app)
+
+    def _poll_app(self):
+        self._app_after_id = None
+        try:
+            while True:
+                tipo, dato = self.cola_app.get_nowait()
+                self._aplicar_evento_app(tipo, dato)
+        except queue.Empty:
+            pass
+        if self._comprobando_app or self._actualizando:
+            self._app_after_id = self.root.after(100, self._poll_app)
+
+    def _aplicar_evento_app(self, tipo, dato):
+        if tipo == "app_check":
+            self._comprobando_app = False
+            if dato and _hay_version_nueva(dato.get("version", "")):
+                self.actualizacion_info = dato
+                self._mostrar_banner_actualizacion()
+        elif tipo == "app_check_error":
+            self._comprobando_app = False
+        elif tipo == "app_progress":
+            hechos, total, velocidad = dato
+            version = self.actualizacion_info.get("version", "")
+            if total:
+                texto = (
+                    f"Descargando Auto HATS {version}… "
+                    f"{int(100 * hechos / total)} %"
+                )
+            else:
+                texto = f"Descargando Auto HATS {version}… {_tamano_legible(hechos)}"
+            if velocidad:
+                texto += f" · {_tamano_legible(velocidad)}/s"
+            self.lbl_actualizacion.config(text=texto, fg=COLOR_ACCENT)
+        elif tipo == "app_installing":
+            version = self.actualizacion_info.get("version", "")
+            self.lbl_actualizacion.config(
+                text=f"Instalando Auto HATS {version}…", fg=COLOR_ACCENT
+            )
+        elif tipo == "app_restart":
+            self._actualizando = False
+            self.lbl_actualizacion.config(
+                text="Actualización descargada. Reiniciando…", fg=COLOR_ACCENT
+            )
+            self.root.after(400, lambda: self._reiniciar_appimage(dato))
+        elif tipo == "app_quit":
+            self._actualizando = False
+            self.lbl_actualizacion.config(
+                text="Actualización preparada. Reiniciando…", fg=COLOR_ACCENT
+            )
+            self.root.after(700, self.root.destroy)
+        elif tipo == "app_error":
+            self._actualizando = False
+            self._restablecer_boton_actualizacion()
+            self.lbl_actualizacion.config(
+                text=f"No se pudo actualizar: {dato}", fg=COLOR_ERROR
+            )
+            self._dialogo(
+                "Error al actualizar",
+                f"No se pudo actualizar Auto HATS:\n\n{dato}",
+                "error",
+            )
+
+    def _mostrar_banner_actualizacion(self):
+        info = self.actualizacion_info
+        if not info:
+            return
+        self.lbl_actualizacion.config(
+            text=f"Nueva versión {info.get('version', '')} disponible",
+            fg=COLOR_ACCENT,
+        )
+        self.btn_actualizar.config(
+            state="disabled" if self.procesando else "normal", text="Actualizar"
+        )
+        if not self.panel_actualizacion.winfo_manager():
+            self.panel_actualizacion.pack(fill="x", before=self.tarjeta_origen)
+            self._centrar_ventana()
+
+    def _actualizar_aplicacion(self):
+        if self._actualizando:
+            return
+        if self.procesando:
+            self._dialogo(
+                "Proceso en curso",
+                "Espera a que termine de formatear y copiar antes de actualizar Auto HATS.",
+                "warning",
+            )
+            return
+        info = self.actualizacion_info
+        if not info:
+            return
+
+        destino = self._destino_actualizacion(info)
+        if destino is None:
+            webbrowser.open(
+                info.get("html_url")
+                or f"https://github.com/{GITHUB_APP_REPO}/releases/latest"
+            )
+            return
+
+        confirmado = self._dialogo(
+            "Actualizar Auto HATS",
+            "Se descargará Auto HATS "
+            f"{info.get('version', '')} y la aplicación se reiniciará.\n\n"
+            "¿Quieres actualizar ahora?",
+            "info",
+            confirmar=True,
+            texto_ok="Sí, actualizar",
+        )
+        if not confirmado:
+            return
+
+        self._actualizando = True
+        self.btn_actualizar.config(state="disabled", text="Actualizando…")
+        self.btn_ejecutar.config(state="disabled")
+        self.lbl_actualizacion.config(
+            text=f"Descargando Auto HATS {info.get('version', '')}…",
+            fg=COLOR_ACCENT,
+        )
+        threading.Thread(
+            target=self._trabajo_actualizar_app,
+            args=(info, destino),
+            daemon=True,
+        ).start()
+        self._programar_poll_app()
+
+    def _destino_actualizacion(self, info):
+        """Devuelve los datos necesarios para instalar la actualización."""
+        assets = info.get("assets") or {}
+
+        if sys.platform == "win32":
+            if not getattr(sys, "frozen", False):
+                return None
+            base = os.environ.get("LOCALAPPDATA")
+            if not base:
+                return None
+            install_dir = os.path.join(base, "Programs", "Auto-HATS")
+            exe = os.path.join(install_dir, "auto-hats.exe")
+            actual = os.path.dirname(os.path.realpath(sys.executable))
+            if os.path.normcase(os.path.realpath(actual)) != os.path.normcase(
+                os.path.realpath(install_dir)
+            ):
+                return None
+            url = _buscar_asset(assets, "windows-x64.zip")
+            if not url:
+                return None
+            return {
+                "tipo": "windows",
+                "url": url,
+                "install_dir": install_dir,
+                "exe": exe,
+            }
+
+        appimage = (os.environ.get("APPIMAGE") or "").strip()
+        if appimage:
+            ruta = os.path.realpath(appimage)
+            if os.path.isfile(ruta):
+                url = _buscar_asset(assets, ".appimage")
+                if url:
+                    return {"tipo": "appimage", "url": url, "ruta": ruta}
+        return None
+
+    def _trabajo_actualizar_app(self, info, destino):
+        temporal = None
+        try:
+            if destino["tipo"] == "appimage":
+                ruta = destino["ruta"]
+                temporal = ruta + ".nuevo"
+                self._descargar_archivo_actualizacion(destino["url"], temporal)
+                os.chmod(temporal, 0o755)
+                os.replace(temporal, ruta)
+                temporal = None
+                self.cola_app.put(("app_restart", ruta))
+            else:
+                carpeta = tempfile.mkdtemp(prefix="auto-hats-update-")
+                zip_path = os.path.join(carpeta, "auto-hats-update.zip")
+                self._descargar_archivo_actualizacion(destino["url"], zip_path)
+                self.cola_app.put(("app_installing", None))
+                self._lanzar_actualizador_windows(
+                    zip_path, destino["install_dir"], destino["exe"]
+                )
+                self.cola_app.put(("app_quit", None))
+        except Exception as e:
+            if temporal and os.path.exists(temporal):
+                try:
+                    os.remove(temporal)
+                except Exception:
+                    pass
+            self.cola_app.put(("app_error", str(e)))
+
+    def _descargar_archivo_actualizacion(self, url, destino):
+        peticion = urllib.request.Request(url, headers={"User-Agent": "AutoHATS"})
+        with urllib.request.urlopen(
+            peticion, timeout=60
+        ) as respuesta, open(destino, "wb") as archivo:
+            total = int(respuesta.headers.get("Content-Length") or 0)
+            leidos = 0
+            inicio = time.time()
+            while True:
+                bloque = respuesta.read(1024 * 1024)
+                if not bloque:
+                    break
+                archivo.write(bloque)
+                leidos += len(bloque)
+                transcurrido = max(time.time() - inicio, 0.001)
+                self.cola_app.put(
+                    ("app_progress", (leidos, total, leidos / transcurrido))
+                )
+            if total and leidos != total:
+                raise Exception(
+                    "La descarga de la actualización se interrumpió antes de terminar."
+                )
+
+    def _lanzar_actualizador_windows(self, zip_path, install_dir, exe_path):
+        """Lanza un script que sustituye los archivos cuando la app se cierre."""
+        def ps(texto):
+            return (
+                texto.replace("`", "``")
+                .replace("$", "`$")
+                .replace('"', '`"')
+            )
+
+        script = os.path.join(
+            tempfile.gettempdir(), f"auto-hats-update-{os.getpid()}.ps1"
+        )
+        contenido = f'''param([int]$AppPid)
+Wait-Process -Id $AppPid -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 800
+if (Test-Path -LiteralPath "{ps(install_dir)}") {{
+    for ($i = 0; $i -lt 20 -and (Test-Path -LiteralPath "{ps(install_dir)}"); $i++) {{
+        try {{
+            Remove-Item -LiteralPath "{ps(install_dir)}" -Recurse -Force -ErrorAction Stop
+        }} catch {{
+            Start-Sleep -Milliseconds 300
+        }}
+    }}
+}}
+New-Item -ItemType Directory -Path "{ps(install_dir)}" -Force | Out-Null
+Expand-Archive -LiteralPath "{ps(zip_path)}" -DestinationPath "{ps(install_dir)}" -Force
+Remove-Item -LiteralPath "{ps(zip_path)}" -Force -ErrorAction SilentlyContinue
+Start-Process -FilePath "{ps(exe_path)}"
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+'''
+        with open(script, "w", encoding="utf-8-sig") as archivo:
+            archivo.write(contenido)
+
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0)
+        flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-File",
+                script,
+                "-AppPid",
+                str(os.getpid()),
+            ],
+            creationflags=flags,
+            close_fds=True,
+        )
+
+    def _reiniciar_appimage(self, ruta):
+        try:
+            subprocess.Popen([ruta])
+        except Exception as e:
+            self._actualizando = False
+            self._restablecer_boton_actualizacion()
+            self.lbl_actualizacion.config(
+                text="La actualización se descargó, pero no se pudo reiniciar.",
+                fg=COLOR_WARNING,
+            )
+            self._dialogo(
+                "Actualización completada",
+                "Auto HATS se actualizó, pero no se pudo reiniciar "
+                f"automáticamente:\n\n{e}\n\nAbre la aplicación de nuevo.",
+                "warning",
+            )
+            return
+        self.root.destroy()
+
+    def _restablecer_boton_actualizacion(self):
+        self.btn_ejecutar.config(state="normal")
+        self.btn_actualizar.config(state="normal", text="Reintentar")
+        if self.actualizacion_info:
+            self.lbl_actualizacion.config(fg=COLOR_ACCENT)
+
     def _cambiar_modo(self, modo):
         if modo == self.modo_origen or self.procesando:
             return
+        self._cancelar_tooltip()
         self.modo_origen = modo
         self.nombres_pasos = self._nombres_pasos_para(modo)
         # Reconstruir pills
@@ -779,6 +1547,8 @@ class AppHatsPersistentFormatter:
             self._construir_pasos(parent)
         self._aplicar_modo_visual()
         self._guardar_config_actual()
+        if modo == "release" and not self.release_info:
+            self._consultar_release_async()
 
     def _elegir_carpeta(self):
         inicial = self.entry_carpeta.get().strip() or self.config.get("carpeta") or os.path.expanduser("~")
@@ -789,8 +1559,11 @@ class AppHatsPersistentFormatter:
 
     def _guardar_config_actual(self):
         self.config["modo"] = self.modo_origen
-        self.config["url"] = self.entry_url.get().strip() or DEFAULT_URL
         self.config["carpeta"] = self.entry_carpeta.get().strip()
+        if self.release_info:
+            self.config["url"] = self.release_info.get("url", "")
+            self.config["release_name"] = self.release_info.get("name", "")
+            self.config["firmware"] = self.release_info.get("firmware", "")
         guardar_config(self.config)
 
     # ------------------------------------------------------------- diálogos
@@ -901,10 +1674,19 @@ class AppHatsPersistentFormatter:
     def ejecutar_proceso(self):
         if self.procesando:
             return
+        if self._actualizando:
+            self._dialogo(
+                "Actualización en curso",
+                "Espera a que termine la actualización de Auto HATS.",
+                "warning",
+            )
+            return
 
         seleccion = self.combo_unidades.get()
-        current_url = self.entry_url.get().strip()
         current_folder = self.entry_carpeta.get().strip()
+        release_url = ""
+        release_name = ""
+        release_firmware = ""
 
         if not self.unidades:
             self._dialogo(
@@ -919,9 +1701,26 @@ class AppHatsPersistentFormatter:
             return
 
         if self.modo_origen == "release":
-            if not current_url:
-                self._dialogo("Error", "La URL de descarga no puede estar vacía.", "error")
+            if not self.release_info or not (self.release_info.get("url") or "").strip():
+                if self._consultando_release:
+                    self._dialogo(
+                        "Consultando release",
+                        "Todavía se está consultando el último release estable en GitHub.\n"
+                        "Espera unos segundos y vuelve a intentarlo.",
+                        "info",
+                    )
+                else:
+                    self._dialogo(
+                        "Release no disponible",
+                        "No se pudo obtener el último release estable de GitHub.\n\n"
+                        "Comprueba tu conexión y pulsa el botón ↻ de la tarjeta "
+                        "\"Origen de los archivos\".",
+                        "error",
+                    )
                 return
+            release_url = self.release_info["url"].strip()
+            release_name = self.release_info.get("name") or "Release de GitHub"
+            release_firmware = (self.release_info.get("firmware") or "").strip()
         else:
             if not current_folder or not os.path.isdir(current_folder):
                 self._dialogo("Error", "Selecciona una carpeta local válida.", "error")
@@ -950,7 +1749,13 @@ class AppHatsPersistentFormatter:
             except Exception:
                 pass
 
-        origen_texto = current_url if self.modo_origen == "release" else current_folder
+        if self.modo_origen == "release":
+            origen_texto = release_name
+            if release_firmware:
+                origen_texto += f"\nFirmware soportado: {release_firmware}"
+        else:
+            origen_texto = current_folder
+
         confirmado = self._dialogo(
             "Confirmar formateo",
             "Se formateará la unidad en FAT32 y se borrarán TODOS sus datos:\n\n"
@@ -967,7 +1772,15 @@ class AppHatsPersistentFormatter:
         self._preparar_interfaz_proceso()
         threading.Thread(
             target=self._trabajo,
-            args=(self.modo_origen, current_url, current_folder, punto_montaje, dispositivo, target_drive),
+            args=(
+                self.modo_origen,
+                release_url,
+                release_name,
+                current_folder,
+                punto_montaje,
+                dispositivo,
+                target_drive,
+            ),
             daemon=True,
         ).start()
         self._programar_poll()
@@ -976,10 +1789,12 @@ class AppHatsPersistentFormatter:
         self.procesando = True
         self._indeterminado = False
         self._paso_actual = 0
+        self._cancelar_tooltip()
         self.btn_ejecutar.config(state="disabled", text="Procesando…")
+        self.btn_actualizar.config(state="disabled")
         self.combo_unidades.config(state="disabled")
         self.btn_refrescar.config(state="disabled")
-        self.entry_url.config(state="disabled")
+        self.btn_release_refresh.config(state="disabled")
         for indice, etiqueta in enumerate(self.pasos):
             self._pintar_paso(etiqueta, None, indice)
         self.barra.stop()
@@ -999,9 +1814,11 @@ class AppHatsPersistentFormatter:
 
     def _reactivar_controles(self):
         self.btn_ejecutar.config(state="normal", text="Formatear y copiar")
+        if self.actualizacion_info:
+            self.btn_actualizar.config(state="normal")
         self.combo_unidades.config(state="readonly")
         self.btn_refrescar.config(state="normal")
-        self.entry_url.config(state="normal")
+        self.btn_release_refresh.config(state="normal")
 
     def descargar_archivo_directo(self, zip_url, extract_to, al_progresar=None, al_extraer=None):
         req = urllib.request.Request(zip_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -1069,12 +1886,15 @@ class AppHatsPersistentFormatter:
             ("detalle", f"{_tamano_legible(hechos)} de {_tamano_legible(total)} · {archivos} archivo(s)")
         )
 
-    def _trabajo(self, modo, url, carpeta, punto_montaje, dispositivo, target_drive):
+    def _trabajo(self, modo, url, release_name, carpeta, punto_montaje, dispositivo, target_drive):
         self._modo_actual = modo
         temp_dir = tempfile.mkdtemp()
         try:
             if modo == "release":
                 self.cola.put(("paso", (0, "Paso 1 de 3 · Descargando el release")))
+                self.cola.put(
+                    ("detalle", f"Descargando {release_name or 'el release'}…")
+                )
                 self.cola.put(("global", 0))
                 repo_source_path = self.descargar_archivo_directo(
                     url,
@@ -1235,6 +2055,30 @@ class AppHatsPersistentFormatter:
             )
             if not cerrar:
                 return
+        if self._actualizando:
+            cerrar = self._dialogo(
+                "Actualización en curso",
+                "Se está descargando la actualización de Auto HATS. Si cierras ahora, "
+                "la actualización podría quedar incompleta.\n\n¿Cerrar de todos modos?",
+                "warning",
+                confirmar=True,
+                texto_ok="Cerrar de todos modos",
+            )
+            if not cerrar:
+                return
+        self._cancelar_tooltip()
+        if self._release_after_id is not None:
+            try:
+                self.root.after_cancel(self._release_after_id)
+            except Exception:
+                pass
+            self._release_after_id = None
+        if self._app_after_id is not None:
+            try:
+                self.root.after_cancel(self._app_after_id)
+            except Exception:
+                pass
+            self._app_after_id = None
         self.root.destroy()
 
 if __name__ == "__main__":
